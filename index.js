@@ -96,6 +96,7 @@ export default class FlowmailerClient {
     data = {},
     from,
     attachments = [],
+    text = ''
   }) {
     if (!toMail) {
       throw new Error('toMail required');
@@ -105,6 +106,26 @@ export default class FlowmailerClient {
     }
     if (!from?.email || !from?.name) {
       throw new Error('Missing from.email or from.name');
+    }
+
+    const payload = {
+      headerFromAddress: from.email,
+      headerFromName: from.name,
+      messageType: 'EMAIL',
+      recipientAddress: toMail,
+      senderAddress: from.email,
+      subject,
+    };
+
+    if (text) {
+      payload.text = text;
+    } else {
+      payload.flowSelector = flowSelector;
+      payload.data = data;
+    }
+
+    if(attachments.length ) {
+      payload.attachments = attachments;
     }
 
     const attempt = async (bearerToken) => {
@@ -119,17 +140,7 @@ export default class FlowmailerClient {
             Authorization: `Bearer ${bearerToken}`,
             'User-Agent': this.userAgent,
           },
-          body: JSON.stringify({
-            headerFromAddress: from.email,
-            headerFromName: from.name,
-            messageType: 'EMAIL',
-            recipientAddress: toMail,
-            senderAddress: from.email,
-            flowSelector,
-            subject,
-            data,
-            attachments,
-          }),
+          body: JSON.stringify(payload),
         }
       );
       return resp;
