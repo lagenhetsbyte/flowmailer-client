@@ -3,16 +3,14 @@
   "version": "1.0.0",
   "description": "",
   "type": "module",
-  "main": "index.js",
-  "files": [],
-  "engines": {
-    "node": ">=18"
+  "main": "./src/index.cjs",
+  "exports": {
+    "import": "./src/index.js",
+    "require": "./src/index.cjs"
   },
   "license": "UNLICENSED",
   "repository": {
     "type": "git",
     "url": "https://github.com/lagenhetsbyte/flowmailer-client"
-  },
-  "publishConfig": {},
-  "scripts": {}
+  }
 }
