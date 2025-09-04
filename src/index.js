@@ -1,3 +1,5 @@
+import axios from 'axios';
+
 export default class FlowmailerClient {
   constructor(cfg, opts = {}) {
     const { accountId, clientId, clientSecret } = cfg ?? {};
@@ -18,11 +20,29 @@ export default class FlowmailerClient {
     this.baseUrl =
       opts.baseUrl ?? `https://api.flowmailer.net/${this.accountId}`;
     this.loginUrl = opts.loginUrl ?? 'https://login.flowmailer.net/oauth/token';
-    this.userAgent = opts.userAgent ?? 'flowmailer-client/1.x (node-fetch)';
+    this.userAgent = opts.userAgent ?? 'flowmailer-client/1.x (axios)';
 
     this._token = '';
     this._expiresAt = 0;
     this._inflightRefresh = null;
+
+    this.http = axios.create({
+      baseURL: this.baseUrl,
+      timeout: this.timeoutMs,
+      headers: {
+        Accept: 'application/vnd.flowmailer.v1.12+json;charset=UTF-8',
+        'Content-Type': 'application/vnd.flowmailer.v1.12+json;charset=UTF-8',
+        'User-Agent': this.userAgent,
+      },
+      validateStatus: () => true,
+    });
+
+    this.http.interceptors.response.use(
+      (resp) => resp,
+      async (error) => {
+        throw error;
+      }
+    );
   }
 
   _mustRenew() {
@@ -33,44 +53,38 @@ export default class FlowmailerClient {
     );
   }
 
-  async _fetchWithTimeout(url, init = {}) {
-    const ctrl = new AbortController();
-    const id = setTimeout(() => ctrl.abort(), this.timeoutMs);
-    try {
-      return await fetch(url, { ...init, signal: ctrl.signal });
-    } finally {
-      clearTimeout(id);
-    }
-  }
-
   async _updateAccessToken() {
     const form = new URLSearchParams({
       client_id: this.clientId,
       client_secret: this.clientSecret,
       grant_type: 'client_credentials',
-    }).toString();
+    });
 
-    const resp = await this._fetchWithTimeout(this.loginUrl, {
-      method: 'POST',
+    const resp = await axios.post(this.loginUrl, form.toString(), {
       headers: {
         Accept: 'application/json',
         'Content-Type': 'application/x-www-form-urlencoded',
         'User-Agent': this.userAgent,
       },
-      body: form,
+      timeout: this.timeoutMs,
+      validateStatus: () => true,
     });
 
-    if (!resp.ok) {
-      throw new Error(`Token fetch error: ${resp.status} ${resp.statusText}`);
+    if (resp.status < 200 || resp.status >= 300) {
+      throw new Error(
+        `Token fetch error: ${resp.status} ${resp.statusText || ""}`
+      );
     }
 
-    const { access_token, expires_in } = await resp.json();
+    const { access_token, expires_in } = resp.data ?? {};
     if (!access_token || !expires_in) {
       throw new Error('Couldnt get access_token from Flowmailer');
     }
 
     this._token = access_token;
     this._expiresAt = Date.now() + Number(expires_in) * 1000;
+
+    this.http.defaults.headers.common.Authorization = `Bearer ${this._token}`;
     return this._token;
   }
 
@@ -90,25 +104,15 @@ export default class FlowmailerClient {
     return this._token;
   }
 
-  async sendEmail({
+  _buildPayload({
     toMail,
     subject,
     flowSelector,
-    data = {},
+    data,
     from,
-    attachments = [],
-    text = ''
+    attachments,
+    text,
   }) {
-    if (!toMail) {
-      throw new Error('toMail required');
-    }
-    if (!subject) {
-      throw new Error('subject required');
-    }
-    if (!from?.email || !from?.name) {
-      throw new Error('Missing from.email or from.name');
-    }
-
     const payload = {
       headerFromAddress: from.email,
       headerFromName: from.name,
@@ -125,53 +129,70 @@ export default class FlowmailerClient {
       payload.data = data;
     }
 
-    if(attachments.length ) {
+    if (attachments?.length) {
       payload.attachments = attachments;
     }
+    return payload;
+  }
 
-    const attempt = async (bearerToken) => {
-      const resp = await this._fetchWithTimeout(
-        `${this.baseUrl}/messages/submit`,
-        {
-          method: 'POST',
-          headers: {
-            Accept: 'application/vnd.flowmailer.v1.12+json;charset=UTF-8',
-            'Content-Type':
-              'application/vnd.flowmailer.v1.12+json;charset=UTF-8',
-            Authorization: `Bearer ${bearerToken}`,
-            'User-Agent': this.userAgent,
-          },
-          body: JSON.stringify(payload),
-        }
-      );
+  async sendEmail({
+    toMail,
+    subject,
+    flowSelector,
+    data = {},
+    from,
+    attachments = [],
+    text = '',
+  }) {
+    if (!toMail) throw new Error('toMail required');
+    if (!subject) throw new Error('subject required');
+    if (!from?.email || !from?.name)
+      throw new Error('Missing from.email or from.name');
+
+    await this.getAccessToken();
+
+    const payload = this._buildPayload({
+      toMail,
+      subject,
+      flowSelector,
+      data,
+      from,
+      attachments,
+      text,
+    });
+
+    const attempt = async () => {
+      const resp = await this.http.post("/messages/submit", payload);
       return resp;
     };
 
-    let token = await this.getAccessToken();
-    let resp = await attempt(token);
+    let resp = await attempt();
 
     if (resp.status === 401) {
       await this.forceRefresh();
-      token = await this.getAccessToken();
-      resp = await attempt(token);
+      resp = await attempt();
     }
 
     let retries = 0;
     while (
-      !resp.ok &&
+      resp.status !== 202 &&
       (resp.status === 429 || resp.status >= 500) &&
       retries < this.maxRetries
     ) {
-      const backoff = 200 * Math.pow(2, retries);
+      const backoff = 200 * Math.pow(2, retries); // 200ms, 400ms, ...
       await new Promise((r) => setTimeout(r, backoff));
-      resp = await attempt(token);
+      resp = await attempt();
       retries++;
     }
 
-    if (!resp.ok) {
-      const body = await resp.text().catch(() => '');
+    if (resp.status < 200 || resp.status >= 300) {
+      // Låt oss läsa ev. body för felsökning; axios har redan gjort parsing
+      const body =
+        typeof resp.data === 'string'
+          ? resp.data
+          : JSON.stringify(resp.data ?? {});
       throw new Error(
-        `sendEmail error: ${resp.status} ${resp.statusText}${
+        `sendEmail error: ${resp.status} ${resp.statusText || ''}${
           body ? ` — ${body.slice(0, 300)}` : ''
         }`
       );
@@ -180,19 +201,5 @@ export default class FlowmailerClient {
     return true;
   }
 
-  async ping() {
-    const token = await this.getAccessToken();
-    const resp = await this._fetchWithTimeout(
-      `${this.baseUrl}/accounts/${this.accountId}`,
-      {
-        method: 'GET',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'User-Agent': this.userAgent,
-          Accept: 'application/json',
-        },
-      }
-    );
-    return resp.ok;
-  }
+
 }
