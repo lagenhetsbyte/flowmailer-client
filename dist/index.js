@@ -8,6 +8,7 @@ class FlowmailerClient {
     }
 
     this.accountId = accountId;
+
     this.clientId = clientId;
     this.clientSecret = clientSecret;
 
