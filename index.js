@@ -89,7 +89,14 @@ export default class FlowmailerClient {
     return this._token;
   }
 
-  async sendEmail({ toMail, subject, flowSelector, data = {}, from }) {
+  async sendEmail({
+    toMail,
+    subject,
+    flowSelector,
+    data = {},
+    from,
+    attachments = [],
+  }) {
     if (!toMail) {
       throw new Error('toMail required');
     }
@@ -121,6 +128,7 @@ export default class FlowmailerClient {
             flowSelector,
             subject,
             data,
+            attachments,
           }),
         }
       );
