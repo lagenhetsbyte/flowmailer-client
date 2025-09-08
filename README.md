@@ -1,3 +1,3 @@
 # flowmailer-client
 
-test
+Common flowmailer client
